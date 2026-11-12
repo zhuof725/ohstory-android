@@ -252,6 +252,8 @@ function renderShelf() {
   const list = $('#book-list');
   list.innerHTML = '';
   $('#shelf-empty').hidden = state.books.length > 0;
+  const c = $('#shelf-count');
+  if (c) c.textContent = state.books.length ? `${state.books.length} 本` : '';
   state.books.forEach((b, i) => {
     const el = document.createElement('div');
     el.className = 'book-card';
@@ -275,7 +277,7 @@ async function openBook(name) {
   state.book = name;
   $('#book-title').textContent = name;
   setTab('chapters');
-  if (state.caps?.engine !== false) loadFlow();
+  loadFlow();
   showView('book');
   await reloadTree();
 }
@@ -303,6 +305,13 @@ function dirNode(nodes, name) {
   return found ? found.children : [];
 }
 
+function prettyName(name) {
+  return name
+    .replace(/\.md$/, '')
+    .replace(/^第\s*0*(\d+)\s*章[_\s]*/, (m, n) => `第 ${n} 章 · `)
+    .replace(/_/g, ' ');
+}
+
 function renderChapters() {
   const chapters = (state.tree || []).find(n => n.type === 'dir' && n.name === '正文');
   const list = chapters ? chapters.children.filter(f => f.type === 'file') : [];
@@ -315,7 +324,7 @@ function renderChapters() {
     <div class="row-item" data-path="${f.path}">
       <span class="num">${String(i + 1).padStart(2, '0')}</span>
       <div class="main">
-        <div class="name">${escapeHtml(f.name.replace(/\.md$/, ''))}</div>
+        <div class="name">${escapeHtml(prettyName(f.name))}</div>
         <div class="sub">${fmtWords(f.words || 0)}</div>
       </div>
       <span class="chev">›</span>
@@ -337,7 +346,7 @@ function renderFileGroups(tree) {
     }
     const walk = (nodes, prefix = '') => nodes.flatMap(n =>
       n.type === 'dir' ? walk(n.children, prefix + n.name + '/')
-        : [{ ...n, label: prefix + n.name.replace(/\.md$/, '') }]);
+        : [{ ...n, label: prefix + prettyName(n.name) }]);
     el.innerHTML = `<div class="list">` + walk(files).map(f => `
       <div class="row-item" data-path="${f.path}">
         <div class="main"><div class="name">${escapeHtml(f.label)}</div><div class="sub">${fmtWords(f.words || 0)}</div></div>
@@ -353,7 +362,7 @@ function setTab(tab) {
     const p = $('#pane-' + t);
     if (p) p.hidden = t !== tab;
   });
-  if (tab === 'flow' && state.caps?.engine !== false) loadFlow();
+  if (tab === 'flow') loadFlow();
 }
 
 /* ---------- 编辑器 ---------- */
@@ -361,10 +370,13 @@ async function openFile(path) {
   const j = await api('/api/file?path=' + encodeURIComponent(`${state.book}/${path}`));
   state.file = path;
   state.content = j.content;
+  state.heading = '';
   state.saved = true;
-  $('#editor-title').textContent = path.split('/').pop().replace(/\.md$/, '');
+  $('#editor-title').textContent = prettyName(path.split('/').pop());
   const ed = $('#editor');
-  ed.value = j.content;
+  const m = j.content.match(/^#\s+(.+?)\n\n?/);
+  state.heading = m ? m[1].trim() : '';
+  ed.value = m ? j.content.slice(m[0].length) : j.content;
   updateMeta();
   showView('editor');
   ed.scrollTop = 0;
@@ -382,7 +394,7 @@ function updateMeta() {
 
 async function saveFile(force) {
   if (!state.file || (state.saved && !force)) return;
-  const content = $('#editor').value;
+  const content = (state.heading ? `# ${state.heading}\n\n` : '') + $('#editor').value;
   state.saved = true;
   updateMeta();
   try {
@@ -1135,19 +1147,8 @@ function showOffline() {
 }
 
 /* ---------- 启动 ---------- */
-async function loadCapabilities() {
-  try {
-    const c = await api('/api/capabilities');
-    state.caps = c;
-    if (c.engine === false) {
-      $$('.tab[data-tab="flow"]').forEach(t => { t.style.display = 'none'; });
-    }
-  } catch (e) { /* 老服务没有这个接口，按全功能处理 */ }
-}
-
 (async () => {
   bind();
-  await loadCapabilities();
   try {
     await loadConfig();
     await loadBooks();

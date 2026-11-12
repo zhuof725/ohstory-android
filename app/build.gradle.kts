@@ -1,6 +1,7 @@
 plugins {
     id("com.android.application")
     kotlin("android")
+    id("com.chaquo.python")
 }
 
 android {
@@ -11,8 +12,12 @@ android {
         applicationId = "ai.zenstory.ohstory"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.2.0"
+
+        ndk {
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+        }
     }
 
     buildTypes {
@@ -32,4 +37,13 @@ dependencies {
     implementation("androidx.webkit:webkit:1.10.0")
     implementation("org.nanohttpd:nanohttpd:2.3.1")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+}
+
+chaquopy {
+    defaultConfig {
+        buildPython("python3")
+        pip {
+            // 原版脚本只用标准库
+        }
+    }
 }

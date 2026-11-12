@@ -25,6 +25,10 @@ class StoryServer(context: Context, private val webRoot: String = "www") :
     private val root = File(appCtx.filesDir, "projects").apply { mkdirs() }
     private val configFile = File(appCtx.filesDir, "config.json")
     private val pool = Executors.newFixedThreadPool(4)
+    init {
+        runCatching { Engine.ensure(appCtx) }
+    }
+
     private val http = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(600, TimeUnit.SECONDS)
@@ -133,7 +137,9 @@ class StoryServer(context: Context, private val webRoot: String = "www") :
 
         when {
             uri == "/api/capabilities" -> return json(Response.Status.OK,
-                JSONObject().put("engine", false).put("bench", false).put("platform", "android").toString())
+                JSONObject().put("engine", true).put("bench", false)
+                    .put("python", runCatching { Engine.script("story-long-write", "storyctl.py").isFile }.getOrDefault(false))
+                    .put("platform", "android").toString())
 
             uri == "/api/config" && method == Method.GET -> {
                 val c = readConfig()
@@ -310,11 +316,179 @@ class StoryServer(context: Context, private val webRoot: String = "www") :
                 json(Response.Status.OK, JSONObject().put("findings", JSONArray())
                     .put("errors", JSONArray().put("Android 版暂未接入原版检测器")).toString())
 
+            uri == "/api/engine/status" -> {
+                val name = safeBook(params["book"]?.firstOrNull() ?: "")
+                val dir = bookDir(name)
+                if (!dir.isDirectory) return err(Response.Status.NOT_FOUND, "书不存在")
+                return json(Response.Status.OK, Engine.status(dir).toString())
+            }
+            uri == "/api/engine/run" && method == Method.POST -> engineRun(body(session))
             uri == "/api/ai" && method == Method.POST -> ai(body(session))
 
             else -> err(Response.Status.NOT_FOUND, "Not Found")
         }
         error("unreachable")
+    }
+
+
+    /* ---------------- 原版引擎 ---------------- */
+    private fun chatOnce(cfg: JSONObject, messages: JSONArray, maxTokens: Int = 8000): String {
+        val payload = JSONObject()
+            .put("model", cfg.optString("model"))
+            .put("messages", messages)
+            .put("temperature", cfg.optDouble("temperature", 0.85))
+            .put("max_tokens", maxTokens)
+            .put("thinking", JSONObject().put("type", "disabled"))
+        val req = Request.Builder()
+            .url(cfg.optString("baseURL").trimEnd('/') + "/chat/completions")
+            .addHeader("Authorization", "Bearer " + cfg.optString("apiKey"))
+            .post(payload.toString().toRequestBody("application/json".toMediaType()))
+            .build()
+        http.newCall(req).execute().use { resp ->
+            val text = resp.body?.string() ?: ""
+            if (!resp.isSuccessful) throw IllegalStateException(text.take(200))
+            return JSONObject(text).getJSONArray("choices").getJSONObject(0)
+                .getJSONObject("message").optString("content")
+        }
+    }
+
+    private fun sseChat(cfg: JSONObject, messages: JSONArray, maxTokens: Int, out: PipedOutputStream): String {
+        val payload = JSONObject()
+            .put("model", cfg.optString("model"))
+            .put("messages", messages)
+            .put("temperature", cfg.optDouble("temperature", 0.85))
+            .put("max_tokens", maxTokens)
+            .put("stream", true)
+            .put("thinking", JSONObject().put("type", "disabled"))
+        val req = Request.Builder()
+            .url(cfg.optString("baseURL").trimEnd('/') + "/chat/completions")
+            .addHeader("Authorization", "Bearer " + cfg.optString("apiKey"))
+            .post(payload.toString().toRequestBody("application/json".toMediaType()))
+            .build()
+        val sb = StringBuilder()
+        http.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}")
+            val source = resp.body!!.source()
+            while (!source.exhausted()) {
+                val line = source.readUtf8Line() ?: break
+                if (!line.startsWith("data:")) continue
+                val data = line.removePrefix("data:").trim()
+                if (data.isEmpty() || data == "[DONE]") continue
+                val obj = runCatching { JSONObject(data) }.getOrNull() ?: continue
+                val delta = obj.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("delta") ?: continue
+                val piece = delta.optString("content")
+                if (piece.isNotEmpty()) {
+                    sb.append(piece)
+                    out.write(("data: " + JSONObject().put("d", piece).toString() + "\n\n").toByteArray())
+                }
+            }
+        }
+        return sb.toString()
+    }
+
+    private fun engineRun(req: JSONObject): Response {
+        val cfg = readConfig()
+        if (cfg.optString("apiKey").isBlank() || cfg.optString("model").isBlank())
+            return err(Response.Status.BAD_REQUEST, "还没配置模型")
+        val bookName = req.optString("book")
+        val dir = bookDir(bookName)
+        val step = req.optString("step")
+        val chapter = req.optInt("chapter", 0)
+        val instruction = req.optString("instruction")
+
+        if (step != "write" && step != "commit")
+            return err(Response.Status.NOT_IMPLEMENTED, "安卓版暂只支持写正文与提交追踪：$step")
+
+        val pipeIn = PipedInputStream(64 * 1024)
+        val pipeOut = PipedOutputStream(pipeIn)
+        val send: (JSONObject) -> Unit = { o -> runCatching { pipeOut.write(("data: $o\n\n").toByteArray()); pipeOut.flush() } }
+
+        pool.execute {
+            try {
+                if (step == "write") {
+                    send(JSONObject().put("phase", "brief").put("label", "读第 $chapter 章细纲与追踪"))
+                    val prompt = Engine.writerPrompt(dir, chapter)
+                    if (!prompt.optBoolean("ok")) throw IllegalStateException(prompt.optString("text").take(300))
+                    val full = prompt.optString("text")
+                    val skeleton = full.substringBefore("====")
+
+                    val materials = buildString {
+                        append("【细纲】\n").append(readIf(File(dir, "大纲/细纲_第" + chapter.toString().padStart(3, '0') + "章.md")))
+                        append("\n\n【续写状态卡】\n").append(readIf(File(dir, "追踪/上下文.md")))
+                        append("\n\n【卷纲】\n").append(readIf(File(dir, "大纲/卷纲_第一卷.md"), 6000))
+                        append("\n\n【题材定位】\n").append(readIf(File(dir, "设定/题材定位.md"), 2500))
+                        if (instruction.isNotBlank()) append("\n\n【作者本轮要求】\n").append(instruction)
+                    }
+
+                    send(JSONObject().put("phase", "filling").put("label", "主会话填槽"))
+                    val filled = chatOnce(cfg, JSONArray()
+                        .put(JSONObject().put("role", "system").put("content", PLANNER_SYS))
+                        .put(JSONObject().put("role", "user").put("content", skeleton + "\n\n======= 项目材料 =======\n\n" + materials)), 9000)
+
+                    send(JSONObject().put("phase", "writing").put("label", "写手开始写正文"))
+                    val raw = sseChat(cfg, JSONArray()
+                        .put(JSONObject().put("role", "system").put("content", WRITER_SYS))
+                        .put(JSONObject().put("role", "user").put("content", filled)), 12000, pipeOut)
+                    val bodyText = cleanProse(raw)
+
+                    val outline = File(dir, "大纲/细纲_第" + chapter.toString().padStart(3, '0') + "章.md")
+                    val title = Regex("###\\s*第\\s*\\d+\\s*章\\s*[：:]\\s*(.+)").find(
+                        if (outline.isFile) outline.readText() else "")?.groupValues?.get(1)?.trim() ?: "未命名"
+                    val fileName = "第" + chapter.toString().padStart(3, '0') + "章_" + title.replace(Regex("[\\\\/:*?\"<>|\\n\\r]"), " ") + ".md"
+                    File(dir, "正文").mkdirs()
+                    File(dir, "正文/$fileName").writeText("# 第${chapter}章 ${title}\n\n${bodyText.trim()}\n")
+
+                    send(JSONObject().put("phase", "checking").put("label", "原版章节检查"))
+                    val check = Engine.chapterCheck(dir, chapter)
+                    send(JSONObject().put("ok", !check.contains("必须改")).put("file", fileName)
+                        .put("check", JSONObject().put("text", check)).put("done", true))
+                } else {
+                    send(JSONObject().put("phase", "draft").put("label", "生成追踪事务草稿"))
+                    val draftInfo = Engine.trackingDraft(dir, chapter)
+                        ?: throw IllegalStateException("追踪草稿失败：先提交前几章，或检查 _tracking-state.json")
+                    val draftPath = File(dir, draftInfo.optString("draft"))
+                    val draftText = draftPath.readText()
+                    send(JSONObject().put("phase", "filling").put("label", "归纳本章变化"))
+                    val filled = chatOnce(cfg, JSONArray()
+                        .put(JSONObject().put("role", "system").put("content", TRACKING_SYS))
+                        .put(JSONObject().put("role", "user").put("content",
+                            "填写说明：${draftInfo.optString("fill")}\n\nJSON：\n$draftText")), 6000)
+                    val json = filled.trim().removePrefix("```json").removePrefix("```").removeSuffix("```").trim()
+                    val obj = JSONObject(json)
+                    val pos = obj.optJSONObject("context")?.optJSONObject("position")
+                    if (pos != null) {
+                        if (pos.optString("story_time").isBlank()) pos.put("story_time", "第${chapter}章结束时")
+                        if (pos.optString("scene").isBlank()) pos.put("scene", "第${chapter}章末尾场景")
+                    }
+                    draftPath.writeText(obj.toString(1))
+                    send(JSONObject().put("phase", "commit").put("label", "提交追踪状态"))
+                    val commitOut = Engine.trackingCommit(dir, draftPath)
+                    send(JSONObject().put("ok", true).put("commit", commitOut).put("done", true))
+                }
+            } catch (e: Exception) {
+                send(JSONObject().put("error", e.message ?: "执行失败"))
+                send(JSONObject().put("done", true))
+            } finally {
+                runCatching { pipeOut.close() }
+            }
+        }
+
+        return newChunkedResponse(Response.Status.OK, "text/event-stream", pipeIn)
+    }
+
+    private fun readIf(f: File, cap: Int = 9000): String =
+        if (f.isFile) f.readText().let { if (it.length > cap) it.take(cap) + "\n…（截断）" else it } else ""
+
+    private fun cleanProse(text: String): String {
+        val lines = text.split("\n")
+        val bad = Regex("`|正文如下|写入|已读|命中|→|参考文件|任务包|细纲|读取|判定|核对报告|交付")
+        for (i in 0 until minOf(lines.size, 80)) {
+            val t = lines[i].trim()
+            if (t.length >= 12 && !bad.containsMatchIn(t) && t[0] !in "#-*（(") {
+                return lines.drop(i).joinToString("\n").trim()
+            }
+        }
+        return text.trim()
     }
 
     private fun node(f: File): JSONObject {
@@ -469,6 +643,13 @@ class StoryServer(context: Context, private val webRoot: String = "www") :
     }
 
     companion object {
+        private val PLANNER_SYS = """你是 oh-story 写作流程里的「主会话」，职责是把写手 prompt 骨架里所有「［主会话填］」槽位填完。
+只输出填好的整份 prompt，骨架里除空槽外的文字一字不改；不解释、不加代码块。槽位要具体，不写"按需""参考细纲"这类空话。"""
+
+        private val WRITER_SYS = """你是 narrative-writer。严格按任务包执行，只输出正文：不要标题、不要解释、不要过程说明。"""
+
+        private val TRACKING_SYS = """你是 oh-story 的追踪提交者。只输出填写后的完整 JSON，不改结构、不删字段、不加解释、不用代码块。"""
+
         private val STYLE_RULES = """
 写作硬规则：
 1. 中文网文语感，短句为主，动作和对话推进，少用书面语连接词。
