@@ -657,7 +657,15 @@ function renderFlow(s) {
       <div class="flow-card"><h3>精修</h3><p>短篇去味按 short-deslop 口径，直接说要求即可</p>
         <button class="btn ghost small" data-act="short-polish">去 AI 味</button></div>
     `;
-    $$('#pane-flow [data-act]').forEach(b => {
+    if (state.caps?.platform === 'android') {
+    ['direction', 'setting', 'volume', 'outline'].forEach(a => {
+      const b = el.querySelector(`[data-act="${a}"]`);
+      if (b && b.closest('.flow-card')) b.closest('.flow-card').remove();
+    });
+    const more = el.querySelectorAll('[data-act="daily"],[data-act="revision"],[data-act="publish"],[data-act="cover"],[data-act="memory"],[data-act="analyze"],[data-act="short-design"],[data-act="short-draft"]');
+    more.forEach(b => { b.remove(); });
+  }
+  $$('#pane-flow [data-act]').forEach(b => {
       b.onclick = () => {
         const act = b.dataset.act;
         if (act === 'short-design') return askMoment('short-design');
@@ -700,6 +708,14 @@ function renderFlow(s) {
       </div>
     </div>
   `;
+  if (state.caps?.platform === 'android') {
+    ['direction', 'setting', 'volume', 'outline'].forEach(a => {
+      const b = el.querySelector(`[data-act="${a}"]`);
+      if (b && b.closest('.flow-card')) b.closest('.flow-card').remove();
+    });
+    const more = el.querySelectorAll('[data-act="daily"],[data-act="revision"],[data-act="publish"],[data-act="cover"],[data-act="memory"],[data-act="analyze"],[data-act="short-design"],[data-act="short-draft"]');
+    more.forEach(b => { b.remove(); });
+  }
   $$('#pane-flow [data-act]').forEach(b => {
     b.onclick = () => {
       const act = b.dataset.act;

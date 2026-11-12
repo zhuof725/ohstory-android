@@ -22,9 +22,33 @@ import java.util.concurrent.TimeUnit
  */
 object Engine {
 
-    private var started = false
+    private val lock = Object()
+    @Volatile private var started = false
+    @Volatile private var failure: String? = null
     lateinit var skills: File
         private set
+
+    val ready: Boolean get() = started
+
+    fun fail(e: Throwable) {
+        failure = e.message ?: "引擎初始化失败"
+        synchronized(lock) { lock.notifyAll() }
+    }
+
+    /** 等引擎就绪，最多等 timeoutMs */
+    fun await(timeoutMs: Long = 30000): Boolean {
+        if (started) return true
+        if (failure != null) return false
+        synchronized(lock) {
+            val deadline = System.currentTimeMillis() + timeoutMs
+            while (!started && failure == null) {
+                val left = deadline - System.currentTimeMillis()
+                if (left <= 0) break
+                lock.wait(left)
+            }
+        }
+        return started
+    }
 
     fun ensure(ctx: Context) {
         if (started) return
@@ -34,6 +58,7 @@ object Engine {
             unzipSkills(ctx)
         }
         started = true
+        synchronized(lock) { lock.notifyAll() }
     }
 
     /** assets/skills.zip → filesDir/skills */

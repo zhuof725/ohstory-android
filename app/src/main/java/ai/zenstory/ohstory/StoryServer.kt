@@ -26,7 +26,9 @@ class StoryServer(context: Context, private val webRoot: String = "www") :
     private val configFile = File(appCtx.filesDir, "config.json")
     private val pool = Executors.newFixedThreadPool(4)
     init {
-        runCatching { Engine.ensure(appCtx) }
+        Thread {
+            runCatching { Engine.ensure(appCtx) }.onFailure { Engine.fail(it) }
+        }.start()
     }
 
     private val http = OkHttpClient.Builder()
@@ -138,7 +140,8 @@ class StoryServer(context: Context, private val webRoot: String = "www") :
         when {
             uri == "/api/capabilities" -> return json(Response.Status.OK,
                 JSONObject().put("engine", true).put("bench", false)
-                    .put("python", runCatching { Engine.script("story-long-write", "storyctl.py").isFile }.getOrDefault(false))
+                    .put("steps", JSONArray().put("write").put("commit"))
+                    .put("python", Engine.await(5000))
                     .put("platform", "android").toString())
 
             uri == "/api/config" && method == Method.GET -> {
@@ -317,6 +320,7 @@ class StoryServer(context: Context, private val webRoot: String = "www") :
                     .put("errors", JSONArray().put("Android 版暂未接入原版检测器")).toString())
 
             uri == "/api/engine/status" -> {
+                if (!Engine.await()) return err(Response.Status.INTERNAL_ERROR, "引擎还在准备，请稍后重试")
                 val name = safeBook(params["book"]?.firstOrNull() ?: "")
                 val dir = bookDir(name)
                 if (!dir.isDirectory) return err(Response.Status.NOT_FOUND, "书不存在")
@@ -387,6 +391,7 @@ class StoryServer(context: Context, private val webRoot: String = "www") :
     }
 
     private fun engineRun(req: JSONObject): Response {
+        if (!Engine.await()) return err(Response.Status.INTERNAL_ERROR, "引擎还在准备，请稍后重试")
         val cfg = readConfig()
         if (cfg.optString("apiKey").isBlank() || cfg.optString("model").isBlank())
             return err(Response.Status.BAD_REQUEST, "还没配置模型")

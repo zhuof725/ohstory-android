@@ -17,7 +17,8 @@ def run(script, args, cwd):
     try:
         if cwd:
             os.chdir(cwd)
-        sys.argv = [script] + list(args or [])
+        argv = json.loads(args) if args else []
+        sys.argv = [script] + [str(a) for a in argv]
         sys.path.insert(0, os.path.dirname(script))
         with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
             try:
