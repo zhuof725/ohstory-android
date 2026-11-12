@@ -476,9 +476,6 @@ class StoryServer(context: Context, private val webRoot: String = "www") :
         return newChunkedResponse(Response.Status.OK, "text/event-stream", pipeIn)
     }
 
-    private fun readIf(f: File, cap: Int = 9000): String =
-        if (f.isFile) f.readText().let { if (it.length > cap) it.take(cap) + "\n…（截断）" else it } else ""
-
     private fun cleanProse(text: String): String {
         val lines = text.split("\n")
         val bad = Regex("`|正文如下|写入|已读|命中|→|参考文件|任务包|细纲|读取|判定|核对报告|交付")
