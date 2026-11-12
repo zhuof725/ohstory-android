@@ -166,7 +166,7 @@ class StoryServer(context: Context, private val webRoot: String = "www") :
                         json(Response.Status.OK, JSONObject().put("models", arr).toString())
                     }
                 } catch (e: Exception) {
-                    err(Response.Status.BAD_GATEWAY, e.message ?: "拉取失败")
+                    err(Response.Status.INTERNAL_ERROR, e.message ?: "拉取失败")
                 }
             }
             uri == "/api/test" && method == Method.POST -> {
@@ -187,11 +187,11 @@ class StoryServer(context: Context, private val webRoot: String = "www") :
                             JSONObject(text).getJSONArray("choices").getJSONObject(0)
                                 .getJSONObject("message").optString("content")
                         }.getOrDefault("")
-                        if (!r.isSuccessful) err(Response.Status.BAD_GATEWAY, text.take(200))
+                        if (!r.isSuccessful) err(Response.Status.INTERNAL_ERROR, text.take(200))
                         else json(Response.Status.OK, JSONObject().put("ok", true).put("reply", content).toString())
                     }
                 } catch (e: Exception) {
-                    err(Response.Status.BAD_GATEWAY, e.message ?: "连接失败")
+                    err(Response.Status.INTERNAL_ERROR, e.message ?: "连接失败")
                 }
             }
 
@@ -314,6 +314,7 @@ class StoryServer(context: Context, private val webRoot: String = "www") :
 
             else -> err(Response.Status.NOT_FOUND, "Not Found")
         }
+        error("unreachable")
     }
 
     private fun node(f: File): JSONObject {
