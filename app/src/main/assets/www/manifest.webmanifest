@@ -1,0 +1,17 @@
+{
+  "name": "OH Story 小说工作台",
+  "short_name": "OH Story",
+  "description": "网文写作工作台：定方向、卷纲、细纲、写正文、追踪、素材库，跑原版 oh-story 脚本",
+  "start_url": "/?source=pwa",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#faf6ee",
+  "theme_color": "#faf6ee",
+  "lang": "zh-CN",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
